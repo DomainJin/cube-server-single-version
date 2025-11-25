@@ -1,0 +1,26 @@
+import hid
+import time
+
+VID = 0x1234   # <-- thay bằng VID thật
+PID = 0x5678   # <-- thay bằng PID thật
+
+h = hid.device()
+h.open(VID, PID)
+print("Device opened: VID=0x%04X PID=0x%04X" % (VID, PID))
+
+# blocking read with timeout (msec)
+try:
+    while True:
+        data = h.read(64, 1000)   # đợi tới 1000 ms
+        if data:
+            # data là list of ints
+            if data[0] == 0xAA:
+                print("Heartbeat received")
+            else:
+                print("Data:", data)
+        else:
+            # timeout -> không nhận gì trong 1s
+            print("No data (timeout)")
+        time.sleep(0.05)
+finally:
+    h.close()
