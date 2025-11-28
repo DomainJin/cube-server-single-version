@@ -27,6 +27,9 @@ class CommunicationHandler:
             'value': "N/A", 
             'threshold': "N/A"
         }
+        
+        # IR ADC state
+        self.ir_adc_value = 0
     
     def add_log(self, message: str):
         """Thêm log message"""
@@ -86,16 +89,24 @@ class CommunicationHandler:
         self.connection_status = "Connected"
         data_line = args[0]
         
-        # Parse dữ liệu format: "Val:22046 Thr:21649 Stt:0"
-        self._parse_data_line(data_line)
+        # Kiểm tra nếu là IR_ADC frame
+        if data_line.startswith("IR_ADC:"):
+            self._parse_ir_adc_frame(data_line)
+        else:
+            # Parse dữ liệu format: "Val:22046 Thr:21649 Stt:0"
+            self._parse_data_line(data_line)
     
     def handle_raw_udp_data(self, data_line):
         """Xử lý dữ liệu UDP thô từ ESP32"""
         self.total_packets_received += 1
         self.connection_status = "Connected"
         
-        # Parse dữ liệu format: "Val:22046 Thr:21649 Stt:0"
-        self._parse_data_line(data_line)
+        # Kiểm tra nếu là IR_ADC frame
+        if data_line.startswith("IR_ADC:"):
+            self._parse_ir_adc_frame(data_line)
+        else:
+            # Parse dữ liệu format: "Val:22046 Thr:21649 Stt:0"
+            self._parse_data_line(data_line)
     
     def _parse_data_line(self, data_line):
         """Parse dữ liệu chung cho OSC và UDP"""
@@ -120,6 +131,23 @@ class CommunicationHandler:
         except Exception as e:
             self.add_log(f"Error parsing: {str(e)}")
     
+    def _parse_ir_adc_frame(self, data_line):
+        """Xử lý frame IR_ADC riêng"""
+        try:
+            # Parse format: "IR_ADC:2342"
+            if "IR_ADC:" in data_line:
+                adc_value_str = data_line.split("IR_ADC:")[1].strip()
+                self.ir_adc_value = int(adc_value_str)
+                
+                self.add_log(f"IR ADC: {self.ir_adc_value}")
+                
+                # Callback với raw string để GUI xử lý
+                if self.on_data_update:
+                    self.on_data_update(data_line)
+                    
+        except Exception as e:
+            self.add_log(f"Error parsing IR_ADC frame: {str(e)}")
+    
     def get_statistics(self) -> dict:
         """Lấy thống kê"""
         return {
@@ -128,7 +156,8 @@ class CommunicationHandler:
             'connection_status': self.connection_status,
             'raw_touch': self.current_state['raw_touch'],
             'value': self.current_state['value'],
-            'threshold': self.current_state['threshold']
+            'threshold': self.current_state['threshold'],
+            'ir_adc': self.ir_adc_value
         }
     
     def reset_statistics(self):

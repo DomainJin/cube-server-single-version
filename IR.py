@@ -76,7 +76,7 @@ class IRController:
             voltage (float): Giá trị điện áp
         """
         try:
-            command = f"IRtramsmitOut:{voltage:.1f}"
+            command = f"IRtransmitOut:{voltage:.1f}"
             self.comm_handler.send_udp_command(command)
             print(f"[IR] Sent transmit command: {command}")
         except Exception as e:
@@ -90,7 +90,7 @@ class IRController:
             voltage (float): Giá trị điện áp
         """
         try:
-            command = f"IRrecieveOut:{voltage:.1f}"
+            command = f"IRRecieveOut:{voltage:.1f}"
             self.comm_handler.send_udp_command(command)
             print(f"[IR] Sent receive command: {command}")
         except Exception as e:

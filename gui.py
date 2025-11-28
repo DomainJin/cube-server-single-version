@@ -7,12 +7,20 @@ Giao diện người dùng được tối ưu hóa
 import tkinter as tk
 from tkinter import colorchooser, ttk, messagebox, scrolledtext
 import customtkinter as ctk
+from PIL import Image, ImageTk
 from led import LEDController
 from touch import TouchController
 from xilanh import XilanhController
 from IR import IRController
+from heartbeat import HeartbeatManager
 import threading
 import customtkinter as ctk
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import numpy as np
+from collections import deque
+import re
 
 class CubeTouchGUI:
     """Giao diện chính của ứng dụng"""
@@ -31,12 +39,25 @@ class CubeTouchGUI:
         self.touch_controller = TouchController(comm_handler)
         self.xilanh_controller = XilanhController(comm_handler)
         self.ir_controller = IRController(comm_handler, config)
+        self.heartbeat_manager = HeartbeatManager(config)
         
         # GUI components
         self.admin_window = None
+        self.esp_devices_status = []
+        self.esp_device_widgets = {}  # Cache widgets để tránh recreate
+        self.last_device_count = 0
         
-        # Setup callback
+        # Setup callbacks
         self.comm_handler.on_data_update = self.update_realtime_data
+        self.heartbeat_manager.on_device_status_update = self.update_esp_devices_status
+        
+        # Start heartbeat manager
+        self.heartbeat_manager.start()
+        
+        # ADC data storage for plotting
+        self.adc_data = deque(maxlen=100)  # Store last 100 ADC values
+        self.adc_times = deque(maxlen=100)  # Store corresponding timestamps
+        self.adc_current_value = 0
         
         self.setup_window()
         self.create_widgets()
@@ -103,10 +124,13 @@ class CubeTouchGUI:
     
     def setup_window(self):
         """Thiết lập cửa sổ chính"""
-        self.root.title(self.config.window_title)
-        self.root.geometry("900x600")
+        self.root.title("🎆 CUBE TOUCH - VisionX Interactive")
+        self.root.geometry("1000x650")
         self.root.configure(bg="#f8f9fa")
-        self.root.minsize(800, 500)
+        self.root.minsize(950, 600)
+        
+        # Current view state
+        self.current_view = "home"  # home, config, monitor, resolume, motion, map
         
         # Center window on screen
         self.center_window()
@@ -121,72 +145,67 @@ class CubeTouchGUI:
         # Bind resize event
         self.root.bind('<Configure>', self.on_window_resize)
         
+        # Bind close event để dọn dẹp heartbeat manager
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
         # Add window icon and styling
         try:
             self.root.iconbitmap(default="")
         except:
             pass
     
+    def on_closing(self):
+        """Xử lý khi đóng ứng dụng"""
+        try:
+            # Stop heartbeat manager
+            self.heartbeat_manager.stop()
+            print("Heartbeat manager stopped")
+        except Exception as e:
+            print(f"Error stopping heartbeat manager: {e}")
+        
+        # Close main window
+        self.root.destroy()
+    
     def create_widgets(self):
         """Tạo các widget"""
         # Main scrollable frame
         self.create_scrollable_frame()
         
-        # Create sections
+        # Create sections based on current view
         self.create_header()
-        self.create_led_control_section()
-        self.create_led_effects_section()
-        self.create_xilanh_section()
-        self.create_ir_section()
-        self.create_realtime_section()
-        self.create_status_section()
+        if self.current_view == "home":
+            self.create_home_content()
+        elif self.current_view == "config":
+            self.create_config_content()
+        elif self.current_view == "monitor":
+            self.create_monitor_content()
+        elif self.current_view == "resolume":
+            self.create_resolume_content()
+        elif self.current_view == "motion":
+            self.create_motion_content()
+        elif self.current_view == "map":
+            self.create_map_content()
     
     def create_scrollable_frame(self):
-        """Tạo frame có thể cuộn với responsive design"""
-        # Create main container
-        main_container = tk.Frame(self.root, bg="#f8f9fa")
-        main_container.grid(row=0, column=0, sticky="nsew")
-        main_container.grid_rowconfigure(0, weight=1)
-        main_container.grid_columnconfigure(0, weight=1)
-        
-        # Create canvas and scrollbar
-        self.canvas = tk.Canvas(main_container, bg="#f8f9fa", highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = tk.Frame(self.canvas, bg="#f8f9fa")
-        
-        # Configure scrolling
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        
-        # Create window in canvas
-        self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        
-        # Grid canvas and scrollbar
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.scrollbar.grid(row=0, column=1, sticky="ns")
-        
-        # Bind canvas resize
-        self.canvas.bind('<Configure>', self.on_canvas_configure)
+        """Tạo frame chính không có scrollbar"""
+        # Tạo frame chính trực tiếp, không qua canvas
+        self.scrollable_frame = tk.Frame(self.root, bg="#f8f9fa")
+        self.scrollable_frame.pack(fill=tk.BOTH, expand=True)
         
         # Configure responsive grid - 4 columns with equal weight
         for i in range(4):
             self.scrollable_frame.grid_columnconfigure(i, weight=1, minsize=160)
         
         # Configure rows
-        self.scrollable_frame.grid_rowconfigure(1, weight=1)  # Main content row
-        
-        # Ensure equal heights for card containers
-        for i in range(4):
-            self.scrollable_frame.grid_rowconfigure(1, minsize=380)
-        
-        # Add padding to main frame
-        self.scrollable_frame.configure(bg="#f8f9fa")
-        
-        # Mouse wheel scrolling
-        self._bind_mousewheel()
+        self.scrollable_frame.grid_rowconfigure(1, weight=0)  # Metric cards row (fixed height)
+        self.scrollable_frame.grid_rowconfigure(2, weight=1)  # Main content row
+        self.scrollable_frame.grid_rowconfigure(3, weight=0)  # Status row
+    
+    def on_window_resize(self, event):
+        """Xử lý khi resize cửa sổ"""
+        if event.widget == self.root:
+            # Update layout when window resizes
+            self.scrollable_frame.update_idletasks()
     
     def center_window(self):
         """Căn giữa cửa sổ trên màn hình"""
@@ -197,75 +216,901 @@ class CubeTouchGUI:
         y = (self.root.winfo_screenheight() // 2) - (height // 2)
         self.root.geometry(f'{width}x{height}+{x}+{y}')
     
-    def on_window_resize(self, event):
-        """Xử lý khi resize cửa sổ"""
-        if event.widget == self.root:
-            # Update canvas scroll region
-            self.root.after_idle(self.update_scroll_region)
-    
-    def update_scroll_region(self):
-        """Cập nhật scroll region"""
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-    
-    def _bind_mousewheel(self):
-        """Bind mouse wheel to canvas"""
-        def _on_mousewheel(event):
-            self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        self.canvas.bind("<MouseWheel>", _on_mousewheel)
-        self.root.bind("<MouseWheel>", _on_mousewheel)
-    
-    def on_canvas_configure(self, event):
-        """Xử lý khi canvas resize"""
-        # Update scroll region
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        
-        # Make scrollable_frame fill canvas width
-        canvas_width = event.width
-        self.canvas.itemconfig(self.canvas_window, width=canvas_width)
-    
     def create_header(self):
         """Tạo header hiện đại với responsive design"""
         # Main header container with gradient effect
-        header_main = tk.Frame(self.scrollable_frame, bg="#2c3e50", height=80)
+        header_main = tk.Frame(self.scrollable_frame, bg="#2c3e50", height=60)
         header_main.grid(row=0, column=0, columnspan=4, sticky="ew")
+        header_main.pack_propagate(False)
         header_main.grid_propagate(False)
         header_main.grid_columnconfigure(1, weight=1)
         
         # Left side - Logo and title
         left_frame = tk.Frame(header_main, bg="#2c3e50")
-        left_frame.grid(row=0, column=0, sticky="w")
+        left_frame.grid(row=0, column=0, sticky="w", padx=20, pady=0)
         
-        title_label = tk.Label(left_frame, text="🎨 CUBE TOUCH", 
-                              font=("Segoe UI", 24, "bold"), 
+        # Load and display logo
+        try:
+            # Load logo image
+            logo_image = Image.open("logo.png")
+            # Resize logo to fit header (60px height, maintain aspect ratio)
+            logo_height = 50
+            aspect_ratio = logo_image.width / logo_image.height
+            logo_width = int(logo_height * aspect_ratio)
+            logo_image = logo_image.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
+            self.logo_photo = ImageTk.PhotoImage(logo_image)
+            
+            # Logo label
+            logo_label = tk.Label(left_frame, image=self.logo_photo, bg="#2c3e50")
+            logo_label.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 15))
+            
+        except Exception as e:
+            print(f"Could not load logo.png: {e}")
+            # Fallback to text logo if image fails
+            logo_label = tk.Label(left_frame, text="🎨", font=("Segoe UI", 24), 
+                                 bg="#2c3e50", fg="#ecf0f1")
+            logo_label.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 15))
+        
+        # Title and subtitle frame
+        text_frame = tk.Frame(left_frame, bg="#2c3e50")
+        text_frame.grid(row=0, column=1, sticky="w")
+        
+        title_label = tk.Label(text_frame, text="CUBE TOUCH", 
+                              font=("Segoe UI", 16, "bold"), 
                               bg="#2c3e50", fg="#ecf0f1")
         title_label.grid(row=0, column=0, sticky="w")
         
-        subtitle_label = tk.Label(left_frame, text="Professional LED Control System", 
-                                 font=("Segoe UI", 11), 
+        subtitle_label = tk.Label(text_frame, text="Professional LED Control System", 
+                                 font=("Segoe UI", 10), 
                                  bg="#2c3e50", fg="#bdc3c7")
         subtitle_label.grid(row=1, column=0, sticky="w")
         
-        # Right side - Navigation
+        # Center - Navigation tabs
         nav_frame = tk.Frame(header_main, bg="#2c3e50")
-        nav_frame.grid(row=0, column=2, sticky="e")
+        nav_frame.grid(row=0, column=1, sticky="", padx=10, pady=0)
+        
+        # HOME Tab
+        self.home_tab = self.create_nav_button(
+            nav_frame, text="🏠 HOME", command=lambda: self.switch_view("home"),
+            active=(self.current_view == "home")
+        )
+        self.home_tab.grid(row=0, column=0, padx=1, pady=5, ipadx=1, ipady=0)
+        
+        # CONFIG Tab
+        self.config_tab = self.create_nav_button(
+            nav_frame, text="⚙️ CONFIG", command=lambda: self.switch_view("config"),
+            active=(self.current_view == "config")
+        )
+        self.config_tab.grid(row=0, column=1, padx=1, pady=5, ipadx=1, ipady=0)
+        
+        # MONITOR Tab
+        self.monitor_tab = self.create_nav_button(
+            nav_frame, text="🔍 MONITOR", command=lambda: self.switch_view("monitor"),
+            active=(self.current_view == "monitor")
+        )
+        self.monitor_tab.grid(row=0, column=2, padx=1, pady=5, ipadx=1, ipady=0)
+        
+        # RESOLUME Tab
+        self.resolume_tab = self.create_nav_button(
+            nav_frame, text="🎬 RESOLUME", command=lambda: self.switch_view("resolume"),
+            active=(self.current_view == "resolume")
+        )
+        self.resolume_tab.grid(row=0, column=3, padx=1, pady=5, ipadx=1, ipady=0)
+        
+        # MOTION Tab
+        self.motion_tab = self.create_nav_button(
+            nav_frame, text="🎭 MOTION", command=lambda: self.switch_view("motion"),
+            active=(self.current_view == "motion")
+        )
+        self.motion_tab.grid(row=0, column=4, padx=1, pady=5, ipadx=1, ipady=0)
+        
+        # MAP Tab
+        self.map_tab = self.create_nav_button(
+            nav_frame, text="🗺 MAP", command=lambda: self.switch_view("map"),
+            active=(self.current_view == "map")
+        )
+        self.map_tab.grid(row=0, column=5, padx=1, pady=5, ipadx=1, ipady=0)
+        
+        # Right side - Status and admin
+        right_frame = tk.Frame(header_main, bg="#2c3e50")
+        right_frame.grid(row=0, column=2, sticky="e", padx=20, pady=0)
         
         # Status indicator
-        self.status_indicator = tk.Label(nav_frame, text="●", font=("Segoe UI", 16), 
-                                        bg="#2c3e50", fg="#27ae60")
-        self.status_indicator.grid(row=0, column=0)
+        status_frame = tk.Frame(right_frame, bg="#2c3e50")
+        status_frame.grid(row=0, column=0, sticky="e")
         
-        status_text = tk.Label(nav_frame, text="ONLINE", font=("Segoe UI", 10, "bold"), 
+        self.status_indicator = tk.Label(status_frame, text="●", font=("Segoe UI", 16), 
+                                        bg="#2c3e50", fg="#27ae60")
+        self.status_indicator.grid(row=0, column=0, padx=(0, 5))
+        
+        status_text = tk.Label(status_frame, text="ONLINE", font=("Segoe UI", 10, "bold"), 
                               bg="#2c3e50", fg="#27ae60")
         status_text.grid(row=0, column=1)
         
         # Admin button with modern style
         admin_btn = self.create_modern_button(
-            nav_frame, text="⚙️ ADMIN PANEL", command=self.open_admin_window,
-            bg_color="#e74c3c"
+            right_frame, text="⚙️ ADMIN PANEL", command=self.open_admin_window,
+            bg_color="#e74c3c", width=120, height=30
         )
-        admin_btn.grid(row=0, column=2)
+        admin_btn.grid(row=1, column=0, pady=(3, 0))
     
+    def create_nav_button(self, parent, text, command, active=False):
+        """Tạo navigation button nhỏ gọn với bo góc"""
+        # Tạo frame container với bo góc
+        container = tk.Frame(parent, bg="#2c3e50", highlightthickness=0, relief=tk.FLAT)
+        
+        if active:
+            bg_color = "#3498db"
+            fg_color = "white"
+            border_color = "#2980b9"
+            button_relief = tk.RAISED
+            button_bd = 1
+            container.config(bg="#3498db")
+        else:
+            bg_color = "#34495e"
+            fg_color = "#bdc3c7"
+            border_color = "#2c3e50"
+            button_relief = tk.FLAT
+            button_bd = 0
+        
+        # Tạo button nhỏ hơn với highlight rõ ràng
+        button = tk.Button(container, text=text, command=lambda: [command(), self.update_nav_buttons()],
+                          font=("Segoe UI", 8, "bold"),
+                          bg=bg_color, fg=fg_color,
+                          relief=button_relief, cursor="hand2",
+                          padx=8, pady=2,
+                          bd=button_bd, highlightthickness=0,
+                          highlightcolor=border_color,
+                          highlightbackground=border_color,
+                          activebackground="#2980b9",
+                          activeforeground="white")
+        
+        button.pack(fill=tk.BOTH, expand=True)
+        
+        # Thêm hover effect mạnh hơn
+        def on_enter(e):
+            if not active:
+                button.config(bg="#4a6741", fg="white")
+                
+        def on_leave(e):
+            if not active:
+                button.config(bg=bg_color, fg=fg_color)
+        
+        button.bind("<Enter>", on_enter)
+        button.bind("<Leave>", on_leave)
+        
+        return container    
+    def switch_view(self, view):
+        """Chuyển đổi giữa các views khác nhau"""
+        self.current_view = view
+        
+        # Clear current content (keep header)
+        for widget in self.scrollable_frame.winfo_children():
+            if widget.grid_info().get('row', 0) > 0:  # Keep row 0 (header)
+                widget.destroy()
+        
+        # Clear widget cache when switching views
+        if hasattr(self, 'esp_device_widgets'):
+            self.esp_device_widgets.clear()
+        
+        # Update tab appearance
+        self.update_nav_buttons()
+        
+        # Show appropriate content
+        if view == "home":
+            self.create_home_content()
+            # Trigger heartbeat update to restore device list
+            if hasattr(self, 'heartbeat_manager') and self.heartbeat_manager.is_running:
+                devices_status = self.heartbeat_manager.get_all_devices_status()
+                if devices_status:
+                    self.update_esp_devices_status(devices_status)
+        elif view == "config":
+            self.create_config_content()
+        elif view == "monitor":
+            self.create_monitor_content()
+        elif view == "resolume":
+            self.create_resolume_content()
+        elif view == "motion":
+            self.create_motion_content()
+        elif view == "map":
+            self.create_map_content()
+            
+    def update_nav_buttons(self):
+        """Cập nhật trạng thái của navigation buttons"""
+        tabs = {
+            "home": self.home_tab,
+            "config": self.config_tab, 
+            "monitor": self.monitor_tab,
+            "resolume": self.resolume_tab,
+            "motion": self.motion_tab,
+            "map": self.map_tab
+        }
+        
+        for view, tab_container in tabs.items():
+            # Lấy button từ trong container
+            button = tab_container.winfo_children()[0]
+            
+            if self.current_view == view:
+                # Tab đang chọn - sáng xánh dương
+                button.config(bg="#3498db", fg="white", 
+                             highlightcolor="#2980b9", highlightbackground="#2980b9",
+                             relief=tk.RAISED, bd=1)
+                tab_container.config(bg="#3498db")
+            else:
+                # Tab không chọn - màu xám
+                button.config(bg="#34495e", fg="#bdc3c7",
+                             highlightcolor="#2c3e50", highlightbackground="#2c3e50",
+                             relief=tk.FLAT, bd=0)
+                tab_container.config(bg="#2c3e50")
+            
+    def create_config_content(self):
+        """Tạo nội dung CONFIG view"""
+        self.create_led_control_section()
+        self.create_led_effects_section()
+        self.create_xilanh_section()
+        self.create_ir_section()
+        self.create_status_section()
+        
+    def create_monitor_content(self):
+        """Tạo nội dung MONITOR view"""
+        # Import monitor components
+        self.metric_labels = {}
+        self.threshold_entry = None
+        self.threshold_status_label = None
+        self.command_entry = None
+        self.command_status_label = None
+        
+        # Create monitor sections
+        self.create_monitor_metric_cards()
+        self.create_monitor_middle_content()
+        self.create_monitor_command_section()
+        
+    def create_monitor_metric_cards(self):
+        """Tạo 4 metric cards cho MONITOR view"""
+        # RAW TOUCH Card
+        raw_container, raw_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        raw_container.grid(row=1, column=0, sticky="nsew", padx=(8,2), pady=1)
+        raw_container.grid_columnconfigure(0, weight=1)
+        
+        # Header
+        header = ctk.CTkFrame(raw_card, fg_color="#3498db", corner_radius=8, height=35)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+        header.grid_columnconfigure(0, weight=1)
+        
+        header_label = ctk.CTkLabel(header, text="📱 RAW TOUCH", 
+                                   font=ctk.CTkFont("Segoe UI", 12, "bold"),
+                                   text_color="white")
+        header_label.grid(row=0, column=0, pady=4)
+        
+        # Content
+        raw_frame = tk.Frame(raw_card, bg="white", padx=6, pady=2)
+        raw_frame.grid(row=1, column=0, sticky="nsew")
+        raw_frame.grid_columnconfigure(0, weight=1)
+        
+        self.metric_labels = {}
+        self.metric_labels['raw_touch'] = tk.Label(raw_frame, text="N/A",
+                                                   font=("Segoe UI", 12, "bold"),
+                                                   bg="white", fg="#3498db", anchor="center")
+        self.metric_labels['raw_touch'].grid(row=0, column=0, sticky="ew", pady=4)
+        
+        # VALUE Card
+        value_container, value_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        value_container.grid(row=1, column=1, sticky="nsew", padx=2, pady=1)
+        value_container.grid_columnconfigure(0, weight=1)
+        
+        header = ctk.CTkFrame(value_card, fg_color="#e74c3c", corner_radius=8, height=35)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+        header.grid_columnconfigure(0, weight=1)
+        
+        header_label = ctk.CTkLabel(header, text="📈 VALUE", 
+                                   font=ctk.CTkFont("Segoe UI", 12, "bold"),
+                                   text_color="white")
+        header_label.grid(row=0, column=0, pady=4)
+        
+        value_frame = tk.Frame(value_card, bg="white", padx=6, pady=2)
+        value_frame.grid(row=1, column=0, sticky="nsew")
+        value_frame.grid_columnconfigure(0, weight=1)
+        
+        self.metric_labels['value'] = tk.Label(value_frame, text="N/A",
+                                               font=("Segoe UI", 12, "bold"),
+                                               bg="white", fg="#e74c3c", anchor="center")
+        self.metric_labels['value'].grid(row=0, column=0, sticky="ew", pady=4)
+        
+        # THRESHOLD Card
+        threshold_container, threshold_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        threshold_container.grid(row=1, column=2, sticky="nsew", padx=2, pady=1)
+        threshold_container.grid_columnconfigure(0, weight=1)
+        
+        header = ctk.CTkFrame(threshold_card, fg_color="#f39c12", corner_radius=8, height=35)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+        header.grid_columnconfigure(0, weight=1)
+        
+        header_label = ctk.CTkLabel(header, text="🎯 THRESHOLD", 
+                                   font=ctk.CTkFont("Segoe UI", 12, "bold"),
+                                   text_color="white")
+        header_label.grid(row=0, column=0, pady=4)
+        
+        threshold_frame = tk.Frame(threshold_card, bg="white", padx=6, pady=2)
+        threshold_frame.grid(row=1, column=0, sticky="nsew")
+        threshold_frame.grid_columnconfigure(0, weight=1)
+        
+        self.metric_labels['threshold'] = tk.Label(threshold_frame, text="N/A",
+                                                   font=("Segoe UI", 12, "bold"),
+                                                   bg="white", fg="#f39c12", anchor="center")
+        self.metric_labels['threshold'].grid(row=0, column=0, sticky="ew", pady=4)
+        
+        # THRESHOLD CONTROL Card
+        control_container, control_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        control_container.grid(row=1, column=3, sticky="nsew", padx=(2,8), pady=1)
+        control_container.grid_columnconfigure(0, weight=1)
+        
+        header = ctk.CTkFrame(control_card, fg_color="#9b59b6", corner_radius=8, height=35)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+        header.grid_columnconfigure(0, weight=1)
+        
+        header_label = ctk.CTkLabel(header, text="⚙️ CONTROL", 
+                                   font=ctk.CTkFont("Segoe UI", 12, "bold"),
+                                   text_color="white")
+        header_label.grid(row=0, column=0, pady=4)
+        
+        control_frame = tk.Frame(control_card, bg="white", padx=6, pady=2)
+        control_frame.grid(row=1, column=0, sticky="nsew")
+        control_frame.grid_columnconfigure(0, weight=1)
+        
+        tk.Label(control_frame, text="Ngưỡng:", font=("Segoe UI", 8, "bold"),
+                bg="white", fg="#2c3e50").grid(row=0, column=0, sticky="w", pady=(2, 1))
+        
+        entry_frame = tk.Frame(control_frame, bg="white")
+        entry_frame.grid(row=1, column=0, sticky="ew", pady=(0, 2))
+        entry_frame.grid_columnconfigure(0, weight=1)
+        
+        self.threshold_entry = tk.Entry(entry_frame, font=("Segoe UI", 9),
+                                       relief=tk.FLAT, bd=2, justify=tk.CENTER,
+                                       bg="#f8f9fa", fg="#2c3e50")
+        self.threshold_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6), ipady=2)
+        self.threshold_entry.insert(0, self.config.default_threshold)
+        
+        btn_send = self.create_modern_button(
+            entry_frame, text="Gửi", command=self.send_threshold,
+            bg_color="#9b59b6", width=40, height=22
+        )
+        btn_send.grid(row=0, column=1)
+        
+        self.threshold_status_label = tk.Label(control_frame, text="Chưa gửi ngưỡng",
+                                              font=("Segoe UI", 7),
+                                              bg="white", fg="#7f8c8d", anchor="center")
+        self.threshold_status_label.grid(row=2, column=0, sticky="ew", pady=(1, 0))
+        
+    def create_monitor_middle_content(self):
+        """Tạo nội dung giữa cho MONITOR view"""
+        # Real-time monitoring panel
+        middle_container, middle_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        middle_container.grid(row=2, column=0, columnspan=4, sticky="nsew", padx=(8,8), pady=1)
+        middle_container.grid_columnconfigure(0, weight=1)
+        
+        # Header
+        header = ctk.CTkFrame(middle_card, fg_color="#27ae60", corner_radius=8, height=40)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+        header.grid_columnconfigure(0, weight=1)
+        
+        header_label = ctk.CTkLabel(header, text="📡 IR SENSOR MONITORING", 
+                                   font=ctk.CTkFont("Segoe UI", 14, "bold"),
+                                   text_color="white")
+        header_label.grid(row=0, column=0, pady=6)
+        
+        # Content frame
+        content_frame = tk.Frame(middle_card, bg="white", padx=10, pady=4)
+        content_frame.grid(row=1, column=0, sticky="nsew")
+        content_frame.grid_columnconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(1, weight=2)  # Graph column wider
+        
+        # Left side - IR Status Panel
+        status_panel = tk.Frame(content_frame, bg="white")
+        status_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        status_panel.grid_rowconfigure(0, weight=1)
+        status_panel.grid_rowconfigure(1, weight=1)
+        
+        # IR Transmitter
+        transmit_frame = tk.LabelFrame(status_panel, text="📤 IR Transmitter", 
+                                      font=("Segoe UI", 10, "bold"),
+                                      bg="white", fg="#e74c3c", padx=6, pady=4)
+        transmit_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        
+        self.ir_transmit_status = tk.Label(transmit_frame, text="🔴 Transmitter: OFF",
+                                          font=("Segoe UI", 9, "bold"),
+                                          bg="white", fg="#e74c3c")
+        self.ir_transmit_status.grid(row=0, column=0, sticky="w", pady=2)
+        
+        self.ir_transmit_value = tk.Label(transmit_frame, text="Voltage: 0.0V",
+                                         font=("Segoe UI", 9),
+                                         bg="white", fg="#7f8c8d")
+        self.ir_transmit_value.grid(row=1, column=0, sticky="w", pady=2)
+        
+        # IR Receiver
+        receive_frame = tk.LabelFrame(status_panel, text="📥 IR Receiver",
+                                     font=("Segoe UI", 10, "bold"),
+                                     bg="white", fg="#2196f3", padx=6, pady=4)
+        receive_frame.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        
+        self.ir_receive_status = tk.Label(receive_frame, text="🔴 Receiver: OFF",
+                                         font=("Segoe UI", 9, "bold"),
+                                         bg="white", fg="#2196f3")
+        self.ir_receive_status.grid(row=0, column=0, sticky="w", pady=2)
+        
+        self.ir_receive_value = tk.Label(receive_frame, text="Signal: 0.0V",
+                                        font=("Segoe UI", 9),
+                                        bg="white", fg="#7f8c8d")
+        self.ir_receive_value.grid(row=1, column=0, sticky="w", pady=2)
+        
+        # ADC current value display
+        self.adc_current_label = tk.Label(receive_frame, text="IR_ADC: 0",
+                                         font=("Segoe UI", 10, "bold"),
+                                         bg="white", fg="#2196f3")
+        self.adc_current_label.grid(row=2, column=0, sticky="w", pady=2)
+        
+        # Right side - ADC Graph
+        graph_frame = tk.LabelFrame(content_frame, text="📊 IR ADC Graph (0-4095)",
+                                   font=("Segoe UI", 10, "bold"),
+                                   bg="white", fg="#27ae60", padx=6, pady=4)
+        graph_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        
+        # Setup matplotlib figure
+        self.fig = Figure(figsize=(6, 3), dpi=80, facecolor='white')
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_ylim(0, 4095)
+        self.ax.set_xlim(0, 100)
+        self.ax.set_xlabel('Time (samples)', fontsize=8)
+        self.ax.set_ylabel('IR ADC Value', fontsize=8)
+        self.ax.grid(True, alpha=0.3)
+        self.ax.tick_params(labelsize=7)
+        
+        # Create empty line plot
+        self.line, = self.ax.plot([], [], 'b-', linewidth=2)
+        self.fig.tight_layout()
+        
+        # Embed plot in tkinter
+        self.canvas = FigureCanvasTkAgg(self.fig, graph_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def create_monitor_command_section(self):
+        """Tạo CUSTOM COMMAND section cho MONITOR view"""
+        command_container, command_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        command_container.grid(row=3, column=0, columnspan=4, sticky="nsew", padx=(8,8), pady=1)
+        command_container.grid_columnconfigure(0, weight=1)
+        
+        header = ctk.CTkFrame(command_card, fg_color="#e74c3c", corner_radius=8, height=50)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+        header.grid_columnconfigure(0, weight=1)
+        
+        header_label = ctk.CTkLabel(header, text="💻 CUSTOM COMMAND", 
+                                   font=ctk.CTkFont("Segoe UI", 14, "bold"),
+                                   text_color="white")
+        header_label.grid(row=0, column=0, pady=4)
+        
+        command_frame = tk.Frame(command_card, bg="white", padx=8, pady=4)
+        command_frame.grid(row=1, column=0, sticky="nsew")
+        command_frame.grid_columnconfigure(1, weight=1)
+        
+        tk.Label(command_frame, text="Command:", font=("Segoe UI", 11, "bold"),
+                bg="white", fg="#2c3e50").grid(row=0, column=0, padx=(0, 15), sticky="w")
+        
+        self.command_entry = tk.Entry(command_frame, font=("Segoe UI", 11),
+                                     relief=tk.FLAT, bd=5, justify=tk.LEFT,
+                                     bg="#f8f9fa", fg="#2c3e50")
+        self.command_entry.grid(row=0, column=1, padx=(0, 15), sticky="ew", ipady=5)
+        self.command_entry.insert(0, "What do u want?")
+        
+        btn_send_command = self.create_modern_button(
+            command_frame, text="📤 Send", command=self.send_custom_command,
+            bg_color="#e74c3c", width=100, height=30
+        )
+        btn_send_command.grid(row=0, column=2, sticky="e")
+        
+        self.command_status_label = tk.Label(command_frame, text="Chưa gửi command",
+                                            font=("Segoe UI", 10),
+                                            bg="white", fg="#7f8c8d")
+        self.command_status_label.grid(row=1, column=0, columnspan=3, pady=(10, 0), sticky="ew")
+    
+    def send_custom_command(self):
+        """Gửi custom command"""
+        try:
+            command = self.command_entry.get()
+            print(f"Sending command: {command}")
+            self.command_status_label.config(text=f"Đã gửi: {command}")
+        except Exception as e:
+            print(f"Error sending command: {e}")
+            self.command_status_label.config(text="Lỗi gửi command")
+
+    def create_home_content(self):
+        """Tạo nội dung HOME view"""
+        # Welcome card
+        welcome_container, welcome_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        welcome_container.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=8, pady=(6,3))
+        
+        # Header
+        header_frame = ctk.CTkFrame(welcome_card, fg_color="#3498db", corner_radius=10, height=45)
+        header_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        header_frame.grid_propagate(False)
+        
+        header_label = ctk.CTkLabel(header_frame, text="🏠 CUBE TOUCH SYSTEM DASHBOARD", 
+                                   font=("Segoe UI", 16, "bold"), text_color="white")
+        header_label.grid(row=0, column=0, padx=20, pady=12)
+        
+        # ESP Devices Status Card
+        esp_status_container, esp_status_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        esp_status_container.grid(row=2, column=0, columnspan=4, sticky="nsew", padx=8, pady=(3,6))
+        esp_status_container.grid_columnconfigure(0, weight=1)
+        esp_status_container.grid_rowconfigure(1, weight=1)
+        
+        # ESP Status Header
+        esp_header = ctk.CTkFrame(esp_status_card, fg_color="#27ae60", corner_radius=8, height=40)
+        esp_header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8,0))
+        esp_header.grid_propagate(False)
+        esp_header.grid_columnconfigure(0, weight=1)
+        
+        self.esp_count_label = ctk.CTkLabel(esp_header, text="📡 ESP32 DEVICES STATUS (0 Online / 0 Total)", 
+                                           font=ctk.CTkFont("Segoe UI", 14, "bold"),
+                                           text_color="white")
+        self.esp_count_label.grid(row=0, column=0, pady=8)
+        
+        # ESP Devices List
+        esp_content_frame = tk.Frame(esp_status_card, bg="white", padx=8, pady=8)
+        esp_content_frame.grid(row=1, column=0, sticky="nsew")
+        esp_content_frame.grid_columnconfigure(0, weight=1)
+        
+        # Scrollable frame for devices
+        self.esp_devices_frame = tk.Frame(esp_content_frame, bg="white")
+        self.esp_devices_frame.grid(row=0, column=0, sticky="nsew")
+        self.esp_devices_frame.grid_columnconfigure(0, weight=1)
+        
+        # Initial empty state
+        self.empty_state_label = tk.Label(self.esp_devices_frame, 
+                                         text="⏳ Waiting for ESP32 devices...\nDevices will appear here when they send heartbeat signals.",
+                                         font=("Segoe UI", 11), bg="white", fg="#7f8c8d",
+                                         justify="center")
+        self.empty_state_label.grid(row=0, column=0, pady=30)
+    
+    def update_esp_devices_status(self, devices_status):
+        """Cập nhật trạng thái các ESP devices"""
+        def update():
+            try:
+                # Chỉ update khi đang ở tab HOME và có esp_devices_frame
+                if self.current_view != "home" or not hasattr(self, 'esp_devices_frame'):
+                    return
+                
+                # Kiểm tra esp_devices_frame có tồn tại không
+                try:
+                    self.esp_devices_frame.winfo_exists()
+                except tk.TclError:
+                    # Widget đã bị destroy, không cần update
+                    return
+                
+                # Kiểm tra xem có thay đổi thực sự không
+                if self._devices_status_unchanged(devices_status):
+                    return
+                
+                # Update devices list
+                self.esp_devices_status = devices_status
+                
+                # Update count in header
+                total_devices = len(devices_status)
+                online_devices = sum(1 for device in devices_status if device['is_online'])
+                
+                # Kiểm tra esp_count_label có tồn tại không
+                if hasattr(self, 'esp_count_label'):
+                    try:
+                        self.esp_count_label.configure(
+                            text=f"📡 ESP32 DEVICES STATUS ({online_devices} Online / {total_devices} Total)"
+                        )
+                    except tk.TclError:
+                        return
+                
+                if not devices_status:
+                    # Clear widgets cache
+                    self.esp_device_widgets.clear()
+                    
+                    # Clear current display
+                    for widget in self.esp_devices_frame.winfo_children():
+                        widget.destroy()
+                    
+                    # Show empty state
+                    self.empty_state_label = tk.Label(self.esp_devices_frame, 
+                                                     text="⏳ Waiting for ESP32 devices...\nDevices will appear here when they send heartbeat signals.",
+                                                     font=("Segoe UI", 11), bg="white", fg="#7f8c8d",
+                                                     justify="center")
+                    self.empty_state_label.grid(row=0, column=0, pady=30)
+                else:
+                    # Remove empty state if exists
+                    if hasattr(self, 'empty_state_label') and self.empty_state_label.winfo_exists():
+                        self.empty_state_label.destroy()
+                    
+                    # Update or create device widgets
+                    self._update_device_widgets(devices_status)
+                        
+            except Exception as e:
+                print(f"Error updating ESP devices status: {e}")
+        
+        self.root.after(0, update)
+    
+    def _devices_status_unchanged(self, new_devices_status):
+        """Kiểm tra xem devices status có thay đổi không"""
+        if len(new_devices_status) != len(self.esp_devices_status):
+            return False
+        
+        # Tạo dict để so sánh nhanh
+        old_status = {f"{d['name']}_{d['ip']}": d for d in self.esp_devices_status}
+        new_status = {f"{d['name']}_{d['ip']}": d for d in new_devices_status}
+        
+        # Kiểm tra devices khác nhau
+        if set(old_status.keys()) != set(new_status.keys()):
+            return False
+        
+        # Kiểm tra status thay đổi (chỉ cần kiểm tra trường quan trọng)
+        for key in old_status:
+            if (old_status[key]['is_online'] != new_status[key]['is_online'] or
+                old_status[key]['heartbeat_count'] != new_status[key]['heartbeat_count'] or
+                old_status[key]['last_heartbeat'] != new_status[key]['last_heartbeat'] or
+                old_status[key].get('ping_ms', 0) != new_status[key].get('ping_ms', 0) or
+                old_status[key].get('ping_status', 'Unknown') != new_status[key].get('ping_status', 'Unknown')):
+                return False
+        
+        return True
+    
+    def _update_device_widgets(self, devices_status):
+        """Cập nhật widgets của devices mà không recreate toàn bộ"""
+        current_device_keys = {f"{d['name']}_{d['ip']}" for d in devices_status}
+        existing_keys = set(self.esp_device_widgets.keys())
+        
+        # Xóa devices không còn tồn tại
+        for key in existing_keys - current_device_keys:
+            if key in self.esp_device_widgets:
+                self.esp_device_widgets[key]['frame'].destroy()
+                del self.esp_device_widgets[key]
+        
+        # Cập nhật hoặc tạo mới devices
+        for i, device in enumerate(devices_status):
+            device_key = f"{device['name']}_{device['ip']}"
+            
+            if device_key in self.esp_device_widgets:
+                # Cập nhật widget hiện có
+                self._update_existing_device_widget(device, i)
+            else:
+                # Tạo widget mới
+                self._create_new_device_widget(device, i)
+    
+    def _update_existing_device_widget(self, device, row_index):
+        """Cập nhật widget device hiện có"""
+        device_key = f"{device['name']}_{device['ip']}"
+        
+        # Kiểm tra widget có tồn tại trong cache không
+        if device_key not in self.esp_device_widgets:
+            return
+            
+        widgets = self.esp_device_widgets[device_key]
+        
+        try:
+            # Kiểm tra widget có tồn tại không
+            widgets['frame'].winfo_exists()
+        except tk.TclError:
+            # Widget đã bị destroy, remove from cache
+            del self.esp_device_widgets[device_key]
+            return
+        
+        # Update background color
+        bg_color = "#e8f5e8" if device['is_online'] else "#ffe6e6"
+        widgets['frame'].config(bg=bg_color)
+        
+        # Update status badge
+        if device['is_online']:
+            status_bg = "#27ae60"
+            status_text = "ONLINE"
+            status_icon = "🟢"
+        else:
+            status_bg = "#e74c3c"
+            status_text = "OFFLINE"
+            status_icon = "🔴"
+        
+        widgets['status_badge'].config(bg=status_bg)
+        widgets['status_icon'].config(bg=status_bg, text=status_icon)
+        widgets['status_text'].config(bg=status_bg, text=status_text)
+        
+        # Update info labels
+        widgets['info_frame'].config(bg=bg_color)
+        widgets['name_label'].config(bg=bg_color)
+        widgets['ip_label'].config(bg=bg_color)
+        widgets['stats_frame'].config(bg=bg_color)
+        
+        # Update statistics
+        widgets['last_hb_label'].config(text=f"⏰ Last: {device['last_heartbeat']}", bg=bg_color)
+        widgets['count_label'].config(text=f"📊 Count: {device['heartbeat_count']}", bg=bg_color)
+        widgets['uptime_label'].config(text=f"🕐 Uptime: {device['uptime']}", bg=bg_color)
+        
+        # Update ping info
+        if device['ping_ms'] > 0:
+            ping_text = f"{device['ping_icon']} Ping: {device['ping_ms']:.0f}ms ({device['ping_status']})"
+        else:
+            ping_text = f"{device['ping_icon']} Ping: {device['ping_status']}"
+        widgets['ping_label'].config(text=ping_text, bg=bg_color, fg=device['ping_color'])
+        
+        # Update grid position if changed
+        widgets['frame'].grid(row=row_index, column=0, sticky="ew", padx=2, pady=2)
+    
+    def _create_new_device_widget(self, device, row_index):
+        """Tạo widget mới cho device"""
+        device_key = f"{device['name']}_{device['ip']}"
+        
+        # Create device frame
+        bg_color = "#e8f5e8" if device['is_online'] else "#ffe6e6"
+        device_frame = tk.Frame(self.esp_devices_frame, bg=bg_color, relief=tk.SOLID, bd=1)
+        device_frame.grid(row=row_index, column=0, sticky="ew", padx=2, pady=2)
+        device_frame.grid_columnconfigure(1, weight=1)
+        
+        # Status frame
+        status_frame = tk.Frame(device_frame, bg=bg_color)
+        status_frame.grid(row=0, column=0, padx=8, pady=8, sticky="ns")
+        
+        # Status badge
+        if device['is_online']:
+            status_bg = "#27ae60"
+            status_text = "ONLINE"
+            status_icon = "🟢"
+        else:
+            status_bg = "#e74c3c"
+            status_text = "OFFLINE"
+            status_icon = "🔴"
+        
+        status_badge = tk.Frame(status_frame, bg=status_bg, padx=8, pady=4)
+        status_badge.pack()
+        
+        status_icon_label = tk.Label(status_badge, text=status_icon, font=("Segoe UI", 12),
+                                    bg=status_bg, fg="white")
+        status_icon_label.pack()
+        
+        status_text_label = tk.Label(status_badge, text=status_text, 
+                                    font=("Segoe UI", 8, "bold"),
+                                    bg=status_bg, fg="white")
+        status_text_label.pack()
+        
+        # Device info
+        info_frame = tk.Frame(device_frame, bg=bg_color)
+        info_frame.grid(row=0, column=1, sticky="ew", padx=10, pady=8)
+        info_frame.grid_columnconfigure(1, weight=1)
+        
+        # Device name and IP
+        name_label = tk.Label(info_frame, text=f"📱 {device['name']}", 
+                             font=("Segoe UI", 12, "bold"),
+                             bg=bg_color, fg="#2c3e50")
+        name_label.grid(row=0, column=0, sticky="w")
+        
+        ip_label = tk.Label(info_frame, text=f"🌐 {device['ip']}", 
+                           font=("Segoe UI", 10),
+                           bg=bg_color, fg="#7f8c8d")
+        ip_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        
+        # Statistics
+        stats_frame = tk.Frame(info_frame, bg=bg_color)
+        stats_frame.grid(row=0, column=2, rowspan=2, padx=(15, 8), pady=2, sticky="e")
+        
+        # Statistics labels
+        last_hb_label = tk.Label(stats_frame, text=f"⏰ Last: {device['last_heartbeat']}", 
+                                font=("Segoe UI", 9),
+                                bg=bg_color, fg="#34495e")
+        last_hb_label.grid(row=0, column=0, sticky="e", pady=1)
+        
+        count_label = tk.Label(stats_frame, text=f"📊 Count: {device['heartbeat_count']}", 
+                              font=("Segoe UI", 9),
+                              bg=bg_color, fg="#34495e")
+        count_label.grid(row=1, column=0, sticky="e", pady=1)
+        
+        uptime_label = tk.Label(stats_frame, text=f"🕐 Uptime: {device['uptime']}", 
+                               font=("Segoe UI", 9),
+                               bg=bg_color, fg="#34495e")
+        uptime_label.grid(row=2, column=0, sticky="e", pady=1)
+        
+        # Ping information
+        if device['ping_ms'] > 0:
+            ping_text = f"{device['ping_icon']} Ping: {device['ping_ms']:.0f}ms ({device['ping_status']})"
+        else:
+            ping_text = f"{device['ping_icon']} Ping: {device['ping_status']}"
+        
+        ping_label = tk.Label(stats_frame, text=ping_text, 
+                             font=("Segoe UI", 9, "bold"),
+                             bg=bg_color, fg=device['ping_color'])
+        ping_label.grid(row=3, column=0, sticky="e", pady=1)
+        
+        # Cache widgets for later updates
+        self.esp_device_widgets[device_key] = {
+            'frame': device_frame,
+            'status_frame': status_frame,
+            'status_badge': status_badge,
+            'status_icon': status_icon_label,
+            'status_text': status_text_label,
+            'info_frame': info_frame,
+            'name_label': name_label,
+            'ip_label': ip_label,
+            'stats_frame': stats_frame,
+            'last_hb_label': last_hb_label,
+            'count_label': count_label,
+            'uptime_label': uptime_label,
+            'ping_label': ping_label
+        }
+
+    def create_resolume_content(self):
+        """Tạo nội dung RESOLUME view"""
+        # Resolume card
+        resolume_container, resolume_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        resolume_container.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=8, pady=6)
+        
+        # Header
+        header_frame = ctk.CTkFrame(resolume_card, fg_color="#9b59b6", corner_radius=10, height=50)
+        header_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        header_frame.grid_propagate(False)
+        
+        header_label = ctk.CTkLabel(header_frame, text="🎬 RESOLUME CONTROL", 
+                                   font=("Segoe UI", 16, "bold"), text_color="white")
+        header_label.grid(row=0, column=0, padx=20, pady=15)
+        
+        # Content placeholder
+        content_frame = ctk.CTkFrame(resolume_card, fg_color="transparent")
+        content_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=20)
+        
+        placeholder_label = ctk.CTkLabel(content_frame, text="Resolume control features sẽ được phát triển tại đây", 
+                                        font=("Segoe UI", 12))
+        placeholder_label.grid(row=0, column=0, pady=50)
+
+    def create_motion_content(self):
+        """Tạo nội dung MOTION view"""
+        # Motion card
+        motion_container, motion_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        motion_container.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=8, pady=6)
+        
+        # Header
+        header_frame = ctk.CTkFrame(motion_card, fg_color="#e67e22", corner_radius=10, height=50)
+        header_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        header_frame.grid_propagate(False)
+        
+        header_label = ctk.CTkLabel(header_frame, text="🎭 MOTION CONTROL", 
+                                   font=("Segoe UI", 16, "bold"), text_color="white")
+        header_label.grid(row=0, column=0, padx=20, pady=15)
+        
+        # Content placeholder
+        content_frame = ctk.CTkFrame(motion_card, fg_color="transparent")
+        content_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=20)
+        
+        placeholder_label = ctk.CTkLabel(content_frame, text="Motion tracking và control features sẽ được phát triển tại đây", 
+                                        font=("Segoe UI", 12))
+        placeholder_label.grid(row=0, column=0, pady=50)
+
+    def create_map_content(self):
+        """Tạo nội dung MAP view"""
+        # Map card
+        map_container, map_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        map_container.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=8, pady=6)
+        
+        # Header
+        header_frame = ctk.CTkFrame(map_card, fg_color="#27ae60", corner_radius=10, height=50)
+        header_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        header_frame.grid_propagate(False)
+        
+        header_label = ctk.CTkLabel(header_frame, text="🗺️ MAP", 
+                                   font=("Segoe UI", 16, "bold"), text_color="white")
+        header_label.grid(row=0, column=0, padx=20, pady=15)
+        
+        # Content placeholder
+        content_frame = ctk.CTkFrame(map_card, fg_color="transparent")
+        content_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=20)
+        
+        placeholder_label = ctk.CTkLabel(content_frame, text="MAP và layout configuration sẽ được phát triển tại đây", 
+                                        font=("Segoe UI", 12))
+        placeholder_label.grid(row=0, column=0, pady=50)
+
     def create_led_control_section(self):
         """Tạo section điều khiển LED với thiết kế card"""
         # LED Control Card with simple rounded effect
@@ -596,33 +1441,65 @@ class CubeTouchGUI:
         )
         btn_reset.grid(row=2, column=0, pady=(8, 0), sticky="ew")
     
-    def create_realtime_section(self):
-        """Tạo section monitoring với dashboard design"""
-        # Realtime Card with simple rounded effect
-        realtime_container, realtime_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
-        realtime_container.grid(row=2, column=0, columnspan=4, sticky="nsew", padx=12, pady=12)
+    def add_monitor_button(self):
+        """Thêm button để mở Monitor window"""
+        # Monitor button container
+        monitor_container = tk.Frame(self.scrollable_frame, bg="#f8f9fa")
+        monitor_container.grid(row=2, column=0, columnspan=4, sticky="ew", padx=(8,8), pady=6)
+        monitor_container.grid_columnconfigure(0, weight=1)
         
-        # Card header
-        header = tk.Frame(realtime_card, bg="#27ae60", height=50)
+        # Monitor button
+        btn_monitor = self.create_modern_button(
+            monitor_container, text="🔍 Open MONITOR Window", command=self.open_monitor_window,
+            bg_color="#27ae60", width=200, height=40
+        )
+        btn_monitor.grid(row=0, column=0, pady=10)
+        
+    def open_monitor_window(self):
+        """Mở cửa sổ Monitor"""
+        try:
+            import subprocess
+            import sys
+            subprocess.Popen([sys.executable, "monitor.py"])
+        except Exception as e:
+            print(f"Error opening monitor window: {e}")
+    
+    def create_status_section(self):
+        """Tạo footer status với modern design"""
+        # Status Card with simple rounded effect
+        status_container, status_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        status_container.grid(row=3, column=0, columnspan=4, sticky="ew", padx=(8,8), pady=6)
+        status_container.grid_columnconfigure(0, weight=1)
+        status_container.grid_rowconfigure(1, weight=1)
+        
+        # Card header với CustomTkinter
+        header = ctk.CTkFrame(status_card, fg_color="#27ae60", corner_radius=0, height=50)
         header.grid(row=0, column=0, sticky="ew")
         header.grid_propagate(False)
         header.grid_columnconfigure(0, weight=1)
         
-        header_label = tk.Label(header, text="📊 LIVE MONITORING", 
-                               font=("Segoe UI", 14, "bold"), 
-                               bg="#27ae60", fg="white")
-        header_label.grid(row=0, column=0, pady=15)
+        # Configure card rows
+        status_card.grid_rowconfigure(1, weight=1)
+        
+        header_label = ctk.CTkLabel(header, text="📊 LIVE MONITORING", 
+                                   font=ctk.CTkFont("Segoe UI", 14, "bold"),
+                                   text_color="white")
+        header_label.grid(row=0, column=0, pady=8)
         
         # Dashboard content
-        realtime_frame = tk.Frame(realtime_card, bg="white", padx=25, pady=25)
+        realtime_frame = tk.Frame(status_card, bg="white", padx=8, pady=8)
         realtime_frame.grid(row=1, column=0, sticky="nsew")
         
         # Configure grid
         realtime_frame.grid_columnconfigure(0, weight=1)
         
-        # Metric cards container
-        metrics_container = tk.Frame(realtime_frame, bg="white")
-        metrics_container.grid(row=0, column=0, sticky="nsew", pady=(0, 20))
+        # Top row container - horizontal layout for 4 elements
+        top_row_container = tk.Frame(realtime_frame, bg="white")
+        top_row_container.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        
+        # Configure columns for 4 elements (3 metrics + 1 threshold control)
+        for i in range(4):
+            top_row_container.grid_columnconfigure(i, weight=1)
         
         # Metric cards
         metrics_data = [
@@ -633,140 +1510,172 @@ class CubeTouchGUI:
         
         self.metric_labels = {}
         
+        # Create 3 metric cards on top row
         for i, (key, icon, title, color, default_value) in enumerate(metrics_data):
-            # Metric card
-            metric_card = tk.Frame(metrics_container, bg=color, relief="flat")
-            metric_card.grid(row=i, column=0, sticky="ew", pady=5)
-            metric_card.grid_columnconfigure(1, weight=1)
+            # Metric card - compact horizontal layout with increased height
+            metric_card = tk.Frame(top_row_container, bg=color, relief="flat")
+            metric_card.grid(row=0, column=i, sticky="ew", padx=2, pady=2)
+            metric_card.grid_columnconfigure(0, weight=1)
+            
+            # Icon and title in same row with more padding
+            header_frame = tk.Frame(metric_card, bg=color)
+            header_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(12, 6))
+            header_frame.grid_columnconfigure(1, weight=1)
             
             # Icon
-            icon_label = tk.Label(metric_card, text=icon, font=("Segoe UI", 16),
-                                 bg=color, fg="white", width=3)
-            icon_label.grid(row=0, column=0, rowspan=2, padx=15, pady=15)
+            icon_label = tk.Label(header_frame, text=icon, font=("Segoe UI", 12),
+                                 bg=color, fg="white")
+            icon_label.grid(row=0, column=0, padx=(0, 5))
             
             # Title
-            title_label = tk.Label(metric_card, text=title, font=("Segoe UI", 10, "bold"),
+            title_label = tk.Label(header_frame, text=title, font=("Segoe UI", 9, "bold"),
                                   bg=color, fg="white", anchor="w")
-            title_label.grid(row=0, column=1, sticky="ew", padx=(0, 15), pady=(15, 0))
+            title_label.grid(row=0, column=1, sticky="ew")
             
-            # Value
+            # Value with more space
             self.metric_labels[key] = tk.Label(metric_card, text=default_value, 
                                               font=("Segoe UI", 14, "bold"),
-                                              bg=color, fg="white", anchor="w")
-            self.metric_labels[key].grid(row=1, column=1, sticky="ew", padx=(0, 15), pady=(0, 15))
+                                              bg=color, fg="white", anchor="center")
+            self.metric_labels[key].grid(row=1, column=0, sticky="ew", padx=8, pady=(6, 12))
         
-        # Threshold Control Section
-        threshold_control = tk.Frame(realtime_frame, bg="#f8f9fa", relief="solid", bd=1)
-        threshold_control.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        threshold_control.grid_columnconfigure(1, weight=1)
+        # Threshold Control as 4th element on top row
+        threshold_control = tk.Frame(top_row_container, bg="#9b59b6", relief="flat")
+        threshold_control.grid(row=0, column=3, sticky="ew", padx=2, pady=2)
+        threshold_control.grid_columnconfigure(0, weight=1)
         
-        # Threshold control header
-        control_header = tk.Frame(threshold_control, bg="#9b59b6", height=35)
-        control_header.grid(row=0, column=0, columnspan=3, sticky="ew")
-        control_header.grid_propagate(False)
-        control_header.grid_columnconfigure(0, weight=1)
+        # Header and input in same compact layout as metric cards
+        header_frame = tk.Frame(threshold_control, bg="#9b59b6")
+        header_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        header_frame.grid_columnconfigure(1, weight=1)
         
-        tk.Label(control_header, text="⚙️ THRESHOLD CONTROL", 
-                font=("Segoe UI", 11, "bold"), bg="#9b59b6", fg="white").grid(row=0, column=0, pady=8)
+        # Icon
+        icon_label = tk.Label(header_frame, text="⚙️", font=("Segoe UI", 12),
+                             bg="#9b59b6", fg="white")
+        icon_label.grid(row=0, column=0, padx=(0, 5))
         
-        # Threshold input section
-        input_frame = tk.Frame(threshold_control, bg="#f8f9fa", padx=20, pady=15)
-        input_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
-        input_frame.grid_columnconfigure(1, weight=1)
+        # Title
+        title_label = tk.Label(header_frame, text="THRESHOLD", font=("Segoe UI", 9, "bold"),
+                              bg="#9b59b6", fg="white", anchor="w")
+        title_label.grid(row=0, column=1, sticky="ew")
         
-        tk.Label(input_frame, text="Ngưỡng:", font=("Segoe UI", 11, "bold"),
-                bg="#f8f9fa", fg="#2c3e50").grid(row=0, column=0, padx=(0, 15), sticky="w")
+        # Input section - compact to match metric card height
+        input_frame = tk.Frame(threshold_control, bg="#9b59b6")
+        input_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+        input_frame.grid_columnconfigure(0, weight=1)
         
-        self.threshold_entry = tk.Entry(input_frame, font=("Segoe UI", 11),
-                                       relief=tk.FLAT, bd=5, justify=tk.CENTER,
+        # Entry and button in single row
+        entry_button_frame = tk.Frame(input_frame, bg="#9b59b6")
+        entry_button_frame.grid(row=0, column=0, sticky="ew")
+        entry_button_frame.grid_columnconfigure(0, weight=1)
+        
+        self.threshold_entry = tk.Entry(entry_button_frame, font=("Segoe UI", 9),
+                                       relief=tk.FLAT, bd=1, justify=tk.CENTER,
                                        bg="white", fg="#2c3e50")
-        self.threshold_entry.grid(row=0, column=1, padx=(0, 15), sticky="ew", ipady=5)
+        self.threshold_entry.grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=1)
         self.threshold_entry.insert(0, self.config.default_threshold)
         
-        btn_send_threshold = tk.Button(input_frame, text="📤 Gửi",
+        btn_send_threshold = tk.Button(entry_button_frame, text="📤",
                                       command=self.send_threshold,
-                                      font=("Segoe UI", 11, "bold"), 
-                                      bg="#9b59b6", fg="white",
-                                      relief=tk.FLAT, cursor="hand2", padx=20, pady=8,
-                                      activebackground="#8e44ad")
-        btn_send_threshold.grid(row=0, column=2, sticky="e")
+                                      font=("Segoe UI", 8), 
+                                      bg="white", fg="#9b59b6",
+                                      relief=tk.FLAT, cursor="hand2", padx=6, pady=1)
+        btn_send_threshold.grid(row=0, column=1, sticky="e")
         
-        # Status label
-        self.threshold_status_label = tk.Label(input_frame, text="Chưa gửi ngưỡng",
-                                              font=("Segoe UI", 10),
-                                              bg="#f8f9fa", fg="#7f8c8d")
-        self.threshold_status_label.grid(row=1, column=0, columnspan=3, pady=(10, 0), sticky="ew")
+        # Status label - very compact
+        self.threshold_status_label = tk.Label(input_frame, text="43202",
+                                              font=("Segoe UI", 8),
+                                              bg="#9b59b6", fg="white", anchor="center")
+        self.threshold_status_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         
-        # Command Control Section
+        # Command Control Section - now full width
         command_control = tk.Frame(realtime_frame, bg="#f8f9fa", relief="solid", bd=1)
-        command_control.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        command_control.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         command_control.grid_columnconfigure(1, weight=1)
         
-        # Command control header
-        command_header = tk.Frame(command_control, bg="#e74c3c", height=35)
+        # Command control header - compact
+        command_header = tk.Frame(command_control, bg="#e74c3c", height=30)
         command_header.grid(row=0, column=0, columnspan=3, sticky="ew")
         command_header.grid_propagate(False)
         command_header.grid_columnconfigure(0, weight=1)
         
         tk.Label(command_header, text="💻 CUSTOM COMMAND", 
-                font=("Segoe UI", 11, "bold"), bg="#e74c3c", fg="white").grid(row=0, column=0, pady=8)
+                font=("Segoe UI", 10, "bold"), bg="#e74c3c", fg="white").grid(row=0, column=0, pady=6)
         
-        # Command input section
-        command_input_frame = tk.Frame(command_control, bg="#f8f9fa", padx=20, pady=15)
+        # Command input section - compact
+        command_input_frame = tk.Frame(command_control, bg="#f8f9fa", padx=10, pady=8)
         command_input_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
         command_input_frame.grid_columnconfigure(1, weight=1)
         
-        tk.Label(command_input_frame, text="Command:", font=("Segoe UI", 11, "bold"),
-                bg="#f8f9fa", fg="#2c3e50").grid(row=0, column=0, padx=(0, 15), sticky="w")
+        tk.Label(command_input_frame, text="Command:", font=("Segoe UI", 10),
+                bg="#f8f9fa", fg="#2c3e50").grid(row=0, column=0, padx=(0, 8), sticky="w")
         
-        self.command_entry = tk.Entry(command_input_frame, font=("Segoe UI", 11),
-                                     relief=tk.FLAT, bd=5, justify=tk.LEFT,
+        self.command_entry = tk.Entry(command_input_frame, font=("Segoe UI", 10),
+                                     relief=tk.FLAT, bd=3, justify=tk.LEFT,
                                      bg="white", fg="#2c3e50")
-        self.command_entry.grid(row=0, column=1, padx=(0, 15), sticky="ew", ipady=5)
+        self.command_entry.grid(row=0, column=1, padx=(0, 8), sticky="ew", ipady=3)
         self.command_entry.insert(0, "What do u want?")
         
         btn_send_command = tk.Button(command_input_frame, text="📤 Send",
                                     command=self.send_custom_command,
-                                    font=("Segoe UI", 11, "bold"), 
+                                    font=("Segoe UI", 10, "bold"), 
                                     bg="#e74c3c", fg="white",
-                                    relief=tk.FLAT, cursor="hand2", padx=20, pady=8,
+                                    relief=tk.FLAT, cursor="hand2", padx=12, pady=4,
                                     activebackground="#c0392b")
         btn_send_command.grid(row=0, column=2, sticky="e")
         
-        # Command status label
+        # Command status label - compact
         self.command_status_label = tk.Label(command_input_frame, text="Chưa gửi command",
-                                            font=("Segoe UI", 10),
+                                            font=("Segoe UI", 9),
                                             bg="#f8f9fa", fg="#7f8c8d")
-        self.command_status_label.grid(row=1, column=0, columnspan=3, pady=(10, 0), sticky="ew")
+        self.command_status_label.grid(row=1, column=0, columnspan=3, pady=(6, 0), sticky="ew")
     
     def create_status_section(self):
         """Tạo footer status với modern design"""
-        # Footer status bar
-        footer = tk.Frame(self.scrollable_frame, bg="#34495e", height=50)
-        footer.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(20, 0))
-        footer.grid_propagate(False)
-        footer.grid_columnconfigure(1, weight=1)
+        # Status Card with simple rounded effect
+        status_container, status_card = self.create_rounded_card_simple(self.scrollable_frame, "white")
+        status_container.grid(row=3, column=0, columnspan=4, sticky="ew", padx=(8,8), pady=6)
+        status_container.grid_columnconfigure(0, weight=1)
+        status_container.grid_rowconfigure(1, weight=1)
+        
+        # Card header với CustomTkinter
+        header = ctk.CTkFrame(status_card, fg_color="#34495e", corner_radius=0, height=50)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+        header.grid_columnconfigure(0, weight=1)
+        
+        # Configure card rows
+        status_card.grid_rowconfigure(1, weight=1)
+        
+        header_label = ctk.CTkLabel(header, text="⚡ SYSTEM STATUS", 
+                                   font=ctk.CTkFont("Segoe UI", 14, "bold"),
+                                   text_color="white")
+        header_label.grid(row=0, column=0, pady=8)
+        
+        # Card content
+        status_frame = tk.Frame(status_card, bg="white", padx=8, pady=8)
+        status_frame.grid(row=1, column=0, sticky="nsew")
+        status_frame.grid_columnconfigure(1, weight=1)
         
         # Connection status
-        conn_frame = tk.Frame(footer, bg="#34495e")
-        conn_frame.grid(row=0, column=0, sticky="w", padx=30, pady=15)
+        conn_frame = tk.Frame(status_frame, bg="white")
+        conn_frame.grid(row=0, column=0, sticky="w", padx=(0, 20))
         
         status_icon = tk.Label(conn_frame, text="🌐", font=("Segoe UI", 12), 
-                              bg="#34495e", fg="#3498db")
+                              bg="white", fg="#3498db")
         status_icon.grid(row=0, column=0, padx=(0, 10))
         
         self.status_label = tk.Label(conn_frame, text="OSC Server: Active on port 7000",
                                     font=("Segoe UI", 11, "bold"), 
-                                    bg="#34495e", fg="#ecf0f1")
+                                    bg="white", fg="#2c3e50")
         self.status_label.grid(row=0, column=1)
         
         # System info
-        info_frame = tk.Frame(footer, bg="#34495e")
-        info_frame.grid(row=0, column=2, sticky="e", padx=30, pady=15)
+        info_frame = tk.Frame(status_frame, bg="white")
+        info_frame.grid(row=0, column=2, sticky="e")
         
         time_label = tk.Label(info_frame, text="System Ready",
                              font=("Segoe UI", 10), 
-                             bg="#34495e", fg="#95a5a6")
+                             bg="white", fg="#95a5a6")
         time_label.grid(row=0, column=0)
     
     # Event handlers
@@ -793,9 +1702,9 @@ class CubeTouchGUI:
         """Bật/tắt LED"""
         enabled = self.led_controller.toggle_led()
         
-        self.btn_led_toggle.config(
+        self.btn_led_toggle.configure(
             text=f"{'🟢 LED: Bật' if enabled else '🔴 LED: Tắt'}",
-            bg=self.config.colors['success'] if enabled else self.config.colors['danger']
+            fg_color="#27ae60" if enabled else "#e74c3c"
         )
     
     def set_direction(self, direction: int):
@@ -818,14 +1727,14 @@ class CubeTouchGUI:
         """Bật/tắt config mode"""
         enabled = self.led_controller.toggle_config_mode()
         
-        self.btn_config_toggle.config(
+        self.btn_config_toggle.configure(
             text=f"{'🟡 Config: Bật' if enabled else '🔵 Config: Tắt'}",
-            bg=self.config.colors['warning'] if enabled else self.config.colors['primary']
+            fg_color="#f39c12" if enabled else "#3498db"
         )
         
-        self.config_status_label.config(
+        self.config_status_label.configure(
             text=f"{'🟡 Config Mode: ESP32 nhận lệnh LED' if enabled else '🔵 Config Mode: Tắt'}",
-            fg=self.config.colors['warning'] if enabled else self.config.colors['primary']
+            text_color="#f39c12" if enabled else "#3498db"
         )
     
     def send_rainbow_effect(self):
@@ -926,17 +1835,109 @@ class CubeTouchGUI:
     def update_realtime_data(self, data):
         """Cập nhật dữ liệu realtime"""
         def update():
-            if 'raw_touch' in data:
-                self.metric_labels['raw_touch'].config(text=data['raw_touch'])
-            if 'value' in data:
-                self.metric_labels['value'].config(text=data['value'])
-            if 'threshold' in data:
-                self.metric_labels['threshold'].config(text=data['threshold'])
-            
-            if self.admin_window and hasattr(self.admin_window, 'update_stats'):
-                self.admin_window.update_stats()
+            try:
+                # Process IR_ADC data from ESP32 frame "IR_ADC:2342"
+                if isinstance(data, str):
+                    print(f"Received string data: {data}")  # Debug log
+                    # Parse IR_ADC frame
+                    adc_match = re.search(r'IR_ADC:(\d+)', data)
+                    if adc_match:
+                        adc_value = int(adc_match.group(1))
+                        print(f"Parsed IR_ADC value: {adc_value}")  # Debug log
+                        self.process_adc_data(adc_value)
+                        
+                elif isinstance(data, dict):
+                    print(f"Received dict data: {data}")  # Debug log
+                    # Handle dictionary data - only update if widgets exist
+                    if 'raw_touch' in data and hasattr(self, 'metric_labels') and 'raw_touch' in self.metric_labels:
+                        try:
+                            self.metric_labels['raw_touch'].config(text=data['raw_touch'])
+                        except tk.TclError:
+                            pass  # Widget destroyed
+                    if 'value' in data and hasattr(self, 'metric_labels') and 'value' in self.metric_labels:
+                        try:
+                            self.metric_labels['value'].config(text=data['value'])
+                        except tk.TclError:
+                            pass  # Widget destroyed
+                    if 'threshold' in data and hasattr(self, 'metric_labels') and 'threshold' in self.metric_labels:
+                        try:
+                            self.metric_labels['threshold'].config(text=data['threshold'])
+                        except tk.TclError:
+                            pass  # Widget destroyed
+                            
+                    # Check for IR_ADC data in dictionary
+                    if 'ir_adc' in data:
+                        print(f"Found ir_adc in dict: {data['ir_adc']}")  # Debug log
+                        self.process_adc_data(data['ir_adc'])
+                
+                if self.admin_window and hasattr(self.admin_window, 'update_stats'):
+                    self.admin_window.update_stats()
+                    
+            except Exception as e:
+                print(f"Error in update_realtime_data: {e}")
         
         self.root.after(0, update)
+    
+    def process_adc_data(self, adc_value):
+        """Xử lý dữ liệu ADC và cập nhật đồ thị"""
+        try:
+            print(f"Processing ADC data: {adc_value}")  # Debug log
+            
+            # Clamp ADC value to valid range
+            adc_value = max(0, min(4095, adc_value))
+            
+            # Store current value
+            self.adc_current_value = adc_value
+            
+            # Add to data history
+            self.adc_data.append(adc_value)
+            self.adc_times.append(len(self.adc_data))
+            
+            print(f"ADC data length: {len(self.adc_data)}, latest value: {adc_value}")  # Debug log
+            
+            # Update current value display
+            if hasattr(self, 'adc_current_label'):
+                try:
+                    self.adc_current_label.config(text=f"IR_ADC: {adc_value}")
+                    print("Updated ADC current label")  # Debug log
+                except tk.TclError:
+                    print("ADC label widget destroyed")  # Debug log
+                    pass
+            
+            # Update graph
+            if hasattr(self, 'line') and hasattr(self, 'canvas'):
+                print("Updating ADC graph...")  # Debug log
+                self.update_adc_graph()
+            else:
+                print("Graph widgets not available")  # Debug log
+                
+        except Exception as e:
+            print(f"Error processing ADC data: {e}")
+    
+    def update_adc_graph(self):
+        """Cập nhật đồ thị ADC"""
+        try:
+            if len(self.adc_data) > 0:
+                print(f"Updating graph with {len(self.adc_data)} data points")  # Debug log
+                
+                # Update line data
+                x_data = list(range(len(self.adc_data)))
+                y_data = list(self.adc_data)
+                
+                self.line.set_data(x_data, y_data)
+                
+                # Update x-axis limits to show recent data
+                if len(x_data) > 100:
+                    self.ax.set_xlim(len(x_data) - 100, len(x_data))
+                else:
+                    self.ax.set_xlim(0, max(100, len(x_data)))
+                
+                # Redraw canvas
+                self.canvas.draw_idle()
+                print("Graph updated successfully")  # Debug log
+                
+        except Exception as e:
+            print(f"Error updating ADC graph: {e}")
     
     def open_admin_window(self):
         """Mở cửa sổ admin"""
