@@ -1,0 +1,24 @@
+# Main dependencies for Cube Touch Monitor Application
+# OSC communication
+python-osc==1.8.3
+
+# GUI Framework
+customtkinter==5.2.0
+
+# Image processing
+Pillow==10.0.1
+
+# Data visualization
+matplotlib==3.8.2
+numpy==1.25.2
+
+# Standard libraries (included with Python, listed for reference)
+# tkinter - Built-in GUI toolkit
+# socket - Network communication 
+# threading - Multi-threading support
+# datetime - Date and time handling
+# typing - Type hints
+# sys - System-specific functions
+# os - Operating system interface
+# collections - Collection data types
+# re - Regular expressions
