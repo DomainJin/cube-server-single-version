@@ -21,7 +21,6 @@ from matplotlib.figure import Figure
 import numpy as np
 from collections import deque
 import re
-import os
 
 class CubeTouchGUI:
     """Giao diện chính của ứng dụng"""
@@ -151,26 +150,9 @@ class CubeTouchGUI:
         
         # Add window icon and styling
         try:
-            # Get the directory where the script is located
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            logo_path = os.path.join(script_dir, "logo.png")
-            
-            if os.path.exists(logo_path):
-                # Convert PNG to PhotoImage and set as window icon
-                logo_image = Image.open(logo_path)
-                # Resize for icon (32x32 or 16x16 is typical for window icons)
-                icon_image = logo_image.resize((32, 32), Image.Resampling.LANCZOS)
-                self.icon_photo = ImageTk.PhotoImage(icon_image)
-                self.root.iconphoto(True, self.icon_photo)
-            else:
-                # Fallback to default if logo not found
-                self.root.iconbitmap(default="")
-        except Exception as e:
-            print(f"Could not set window icon: {e}")
-            try:
-                self.root.iconbitmap(default="")
-            except:
-                pass
+            self.root.iconbitmap(default="")
+        except:
+            pass
     
     def on_closing(self):
         """Xử lý khi đóng ứng dụng"""
@@ -249,12 +231,8 @@ class CubeTouchGUI:
         
         # Load and display logo
         try:
-            # Get the directory where the script is located
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            logo_path = os.path.join(script_dir, "logo.png")
-            
             # Load logo image
-            logo_image = Image.open(logo_path)
+            logo_image = Image.open("logo.png")
             # Resize logo to fit header (60px height, maintain aspect ratio)
             logo_height = 50
             aspect_ratio = logo_image.width / logo_image.height
