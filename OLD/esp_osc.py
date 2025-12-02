@@ -39,7 +39,7 @@ def show_osc_uart_line(address, *args):
 
 if __name__ == "__main__":
     ip = "0.0.0.0"
-    port = 7000
+    port = 4500
 
     dispatcher = Dispatcher()
     dispatcher.map("/debug", show_osc_uart_line)

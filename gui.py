@@ -25,7 +25,7 @@ import re
 class CubeTouchGUI:
     """Giao diện chính của ứng dụng"""
     
-    def __init__(self, root, comm_handler, config):
+    def __init__(self, root, comm_handler, config, app=None):
         # Setup CustomTkinter theme
         ctk.set_appearance_mode("light")  # "light" or "dark"
         ctk.set_default_color_theme("blue")  # "blue", "green", "dark-blue"
@@ -33,6 +33,7 @@ class CubeTouchGUI:
         self.root = root
         self.comm_handler = comm_handler
         self.config = config
+        self.app = app  # Tham chiếu đến app để có thể restart UDP server
         
         # Controllers
         self.led_controller = LEDController(comm_handler)
@@ -939,8 +940,72 @@ class CubeTouchGUI:
             ping_text = f"{device['ping_icon']} Ping: {device['ping_status']}"
         widgets['ping_label'].config(text=ping_text, bg=bg_color, fg=device['ping_color'])
         
+        # Update access button
+        if device['is_online']:
+            if widgets['access_button'] is None:
+                # Create access button
+                access_button = tk.Button(widgets['stats_frame'], text="🔗 Access", 
+                                         command=lambda ip=device['ip']: self.access_device(ip),
+                                         font=("Segoe UI", 8, "bold"), bg="#3498db", fg="white",
+                                         relief=tk.FLAT, cursor="hand2", padx=8, pady=2)
+                access_button.grid(row=4, column=0, sticky="e", pady=2)
+                widgets['access_button'] = access_button
+        else:
+            if widgets['access_button'] is not None:
+                widgets['access_button'].destroy()
+                widgets['access_button'] = None
+        
         # Update grid position if changed
         widgets['frame'].grid(row=row_index, column=0, sticky="ew", padx=2, pady=2)
+    
+    def access_device(self, ip):
+        """Kết nối với device được chọn"""
+        try:
+            print(f"[DEBUG] Access device called for IP: {ip}")
+            
+            # Parse IP để lấy octet cuối
+            ip_parts = ip.split('.')
+            if len(ip_parts) != 4:
+                raise ValueError("Invalid IP format")
+            
+            last_octet = int(ip_parts[3])
+            # Tạo port từ octet cuối + "00"
+            port = int(str(last_octet) + "00")
+            
+            print(f"[DEBUG] Calculated port: {port}")
+            
+            # Cập nhật config
+            old_port = self.config.osc_port
+            self.config.esp_ip = ip
+            self.config.esp_port = port
+            self.config.osc_port = port
+            
+            print(f"[DEBUG] Config updated: ESP_IP={ip}, ESP_PORT={port}, OSC_PORT={port}")
+            print(f"[DEBUG] Old port: {old_port}, New port: {port}, App available: {self.app is not None}")
+
+            # Restart UDP server nếu port thay đổi và app có sẵn
+            if old_port != port and self.app:
+                print(f"[DEBUG] Starting UDP server restart from {old_port} to {port}")
+                try:
+                    self.app.restart_udp_server()
+                    restart_msg = f"\n✓ UDP Server restarted: {old_port} → {port}"
+                    print(f"[DEBUG] UDP restart successful")
+                except Exception as restart_error:
+                    restart_msg = f"\n✗ UDP restart failed: {str(restart_error)}"
+                    print(f"[DEBUG] UDP restart error: {restart_error}")
+            else:
+                restart_msg = ""
+                if old_port == port:
+                    print(f"[DEBUG] Port unchanged, no restart needed")
+                if not self.app:
+                    print(f"[DEBUG] App reference not available for restart")
+            
+            # Hiển thị thông báo
+            messagebox.showinfo("Device Access", f"Đã kết nối với {ip} trên port {port}{restart_msg}\n\nESP32 giờ có thể gửi data tới port {port}")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error in access_device: {e}")
+            messagebox.showerror("Lỗi", f"Không thể kết nối với device: {str(e)}")
     
     def _create_new_device_widget(self, device, row_index):
         """Tạo widget mới cho device"""
@@ -1025,6 +1090,16 @@ class CubeTouchGUI:
                              bg=bg_color, fg=device['ping_color'])
         ping_label.grid(row=3, column=0, sticky="e", pady=1)
         
+        # Access button for online devices
+        if device['is_online']:
+            access_button = tk.Button(stats_frame, text="🔗 Access", 
+                                     command=lambda ip=device['ip']: self.access_device(ip),
+                                     font=("Segoe UI", 8, "bold"), bg="#3498db", fg="white",
+                                     relief=tk.FLAT, cursor="hand2", padx=8, pady=2)
+            access_button.grid(row=4, column=0, sticky="e", pady=2)
+        else:
+            access_button = None
+        
         # Cache widgets for later updates
         self.esp_device_widgets[device_key] = {
             'frame': device_frame,
@@ -1039,7 +1114,8 @@ class CubeTouchGUI:
             'last_hb_label': last_hb_label,
             'count_label': count_label,
             'uptime_label': uptime_label,
-            'ping_label': ping_label
+            'ping_label': ping_label,
+            'access_button': access_button
         }
 
     def create_resolume_content(self):
